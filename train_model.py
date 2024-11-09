@@ -11,8 +11,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from model import GeneratorNet, DiscriminatorNet
 from torch.optim.lr_scheduler import CosineAnnealingLR
+
+from model import GeneratorNet, DiscriminatorNet
 from dataset_helper import DehazingImageDataset
 from metrics import get_psnr, get_ssim
 from vgg_perceptual_loss import VGGIntermediate
@@ -53,8 +54,10 @@ class CGANDehaze(nn.Module):
         for param in custom_vgg.parameters():
             param.requires_grad = False
             
-        outputs_generated = custom_vgg(generator_clear_image)
-        outputs_real = custom_vgg(real_clear_image.detach())
+        # Adding 1 to the input which is feed to custom_vgg, because these
+        # tensors are generated in the range of [-1, 1]
+        outputs_generated = custom_vgg(generator_clear_image + 1)
+        outputs_real = custom_vgg(real_clear_image.detach() + 1)
 
         perceptual_loss = 0
         for output_real, output_gen in zip(outputs_real, outputs_generated):
@@ -137,8 +140,12 @@ class CGANDehaze(nn.Module):
                 
                 img_1 = gen_img_B.detach().to(self.host)
                 img_2 = gt_img_B.detach().to(self.host)
-                psnr = get_psnr(img_1 + 1, img_2 + 1, data_range=2.0)      # adding 1 so that range becomes [0, 2] from [-1, 1]
-                ssim = get_ssim(img_1 + 1, img_2 + 1, data_range=2.0)      # adding 1 so that range becomes [0, 2] from [-1, 1]
+                
+                # converting data from [-1, 1] into [0, 255] and with uint8 dtype
+                img_1 = ((img_1 + 1) * 127.5).clamp(0, 255).to(torch.uint8)
+                img_2 = ((img_2 + 1) * 127.5).clamp(0, 255).to(torch.uint8)
+                psnr = get_psnr(img_1, img_2, data_range=255.0)      
+                ssim = get_ssim(img_1.to(torch.float32), img_2.to(torch.float32), data_range=255.0)      # adding 1 so that range becomes [0, 2] from [-1, 1]
                 mean_ssim += ssim
                 mean_psnr += psnr
                 
