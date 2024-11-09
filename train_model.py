@@ -21,7 +21,8 @@ from vgg_perceptual_loss import VGGIntermediate
 class CGANDehaze(nn.Module):
     def __init__(self, input_nc, output_nc, ngf, ndf, input_hw, output_hw, 
                  batch_size, num_epochs, dataset_path, sample_size, random_flip, 
-                 normalize_gram_matrix, vgg_layers_to_extract):
+                 normalize_gram_matrix, vgg_layers_to_extract,
+                 perceptual_loss_lambda, l1_loss_lambda, grad_loss_lambda):
         super().__init__()
         self.generator = GeneratorNet(input_nc, output_nc, ngf)
         self.generator = torch.compile(self.generator) 
@@ -36,6 +37,9 @@ class CGANDehaze(nn.Module):
         self.random_flip = random_flip
         self.normalize_gram_matrix = normalize_gram_matrix
         self.vgg_layers_to_extract = vgg_layers_to_extract
+        self.perceptual_loss_lambda = perceptual_loss_lambda
+        self.l1_loss_lambda = l1_loss_lambda
+        self.grad_loss_lambda = grad_loss_lambda
         
         self.gpu = torch.device("cuda:0")
         self.host = torch.device("cpu:0")
@@ -79,8 +83,25 @@ class CGANDehaze(nn.Module):
             perceptual_loss += torch.mean((output_gen_gram - output_real_gram) ** 2)
         
         perceptual_loss /= len(output_real)
-        return perceptual_loss
+        return perceptual_loss * self.perceptual_loss_lambda
             
+    def grad_loss(self, gen_img_B):
+        B, C, H, W = gen_img_B.size()
+        
+        x_diff = gen_img_B[:, :, :H-1, :W-1] - gen_img_B[:, :, :H-1, 1:W]
+        y_diff = gen_img_B[:, :, :H-1, :W-1] - gen_img_B[:, :, 1:H, :W-1]
+        
+        res = torch.zeros_like(gen_img_B)
+        res[:, :, :H-1, :W-1] = x_diff + y_diff
+        res[:, :, :H-1, 1:W] -= x_diff
+        res[:, :, 1:H, :W-1] -= y_diff
+        return res
+
+    def tv_loss(self, gen_img_B, gt_img_B):
+        l1_loss = nn.L1Loss()
+        tv_loss = self.l1_loss_lambda * l1_loss(gen_img_B, gt_img_B) + self.grad_loss_lambda * self.grad_loss(gen_img_B)
+        return tv_loss
+
     def train(self):
         dataset = DehazingImageDataset(self.dataset_path, sample_size=self.sample_size, random_flip=self.random_flip)
         data_loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
@@ -130,13 +151,17 @@ class CGANDehaze(nn.Module):
                 fake_output = self.discriminator(torch.cat([gt_img_A, gen_img_B], dim=1))
                 gen_gan_loss = self.bce_loss(fake_output, real_label)
                 perceptual_loss = self.perceptual_loss(gen_img_B, gt_img_B)
-                total_generator_loss = gen_gan_loss + perceptual_loss
+                tv_loss = self.tv_loss(gen_img_B, gt_img_B)
+                total_generator_loss = gen_gan_loss + perceptual_loss + tv_loss
                 total_generator_loss.backward()
                 opt_gen.step()
                 
                 scheduler_gen.step()
                 scheduler_dis.step()
-                print(f"Epoch: {epoch+1}/{self.num_epochs}, Batch: {batch_num}/{len(data_loader)}, Gen. Loss: {total_generator_loss:.4f}, Disc. Loss: {total_discriminator_loss:.4f}, LR: {scheduler_gen.get_last_lr()[0]:.4f}")
+                print("--"*30)
+                print(f"Epoch: {epoch+1}/{self.num_epochs}, Batch: {batch_num}/{len(data_loader)}, LR: {scheduler_gen.get_last_lr()[0]:.4f}")
+                print(f"Gen. GAN Loss: {gen_gan_loss:.4f}, Gen. Perceptual Loss: {perceptual_loss:.4f}, Gen. TV Loss: {tv_loss:.4f}")
+                print(f"Total Gen. Loss: {total_generator_loss:.4f}, Disc. Loss: {total_discriminator_loss:.4f}")
                 
                 img_1 = gen_img_B.detach().to(self.host)
                 img_2 = gt_img_B.detach().to(self.host)
@@ -168,7 +193,8 @@ if __name__ == "__main__":
     model = CGANDehaze(config.input_nc, config.output_nc, config.base_channels_gen, config.base_channels_dis,
                        config.input_hw, config.output_hw, config.batch_size, config.num_epochs, 
                        config.dataset_path, config.sample_size, config.random_flip, 
-                       config.normalize_gram_matrix, config.vgg_layers_to_extract)
+                       config.normalize_gram_matrix, config.vgg_layers_to_extract,
+                       config.perceptual_loss_lambda, config.l1_loss_lambda, config.grad_loss_lambda)
     model.train()
     
     # model.test()  
