@@ -12,6 +12,7 @@ import torch.nn as nn
 from PIL import Image
 import torch.optim as optim
 import torchvision.transforms as transforms
+from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -24,7 +25,8 @@ class CGANDehaze(nn.Module):
     def __init__(self, input_nc, output_nc, ngf, ndf, input_hw, output_hw, 
                  batch_size, num_epochs, dataset_path, sample_size, random_flip, 
                  normalize_gram_matrix, vgg_layers_to_extract,
-                 perceptual_loss_lambda, l1_loss_lambda, grad_loss_lambda):
+                 perceptual_loss_lambda, l1_loss_lambda, grad_loss_lambda,
+                 use_amp):
         super().__init__()
         self.generator = GeneratorNet(input_nc, output_nc, ngf)
         self.generator = torch.compile(self.generator) 
@@ -45,6 +47,7 @@ class CGANDehaze(nn.Module):
         self.perceptual_loss_lambda = perceptual_loss_lambda
         self.l1_loss_lambda = l1_loss_lambda
         self.grad_loss_lambda = grad_loss_lambda
+        self.use_amp = use_amp
         
         self.gpu = torch.device("cuda:0")
         self.host = torch.device("cpu:0")
@@ -129,6 +132,7 @@ class CGANDehaze(nn.Module):
         scheduler_dis = CosineAnnealingLR(opt_dis, T_max=total_steps, eta_min=1e-5)
         
         global_step = 1
+        scaler = GradScaler("cuda", enabled=self.use_amp)
         for epoch in range(self.num_epochs):
             mean_ssim = 0
             mean_psnr = 0
@@ -140,34 +144,40 @@ class CGANDehaze(nn.Module):
                 hazy_img_B = hazy_img_B.to(self.gpu)
                 batch_size = gt_img_A.shape[0]
                 
-                gen_img_B = self.generator(hazy_img_B)
+                with autocast("cuda", enabled=self.use_amp):
+                    gen_img_B = self.generator(hazy_img_B)
+                    
+                    # Train Discriminator
+                    opt_dis.zero_grad()
+                    # real input and real shall be output
+                    real_output = self.discriminator(torch.cat([gt_img_A, gt_img_B], dim=1))
+                    real_label = torch.ones([batch_size, 1, self.output_hw, self.output_hw], dtype=torch.float32).to(self.gpu)
+                    real_loss = self.bce_loss(real_output, real_label)
+                    
+                    # fake input and fake shall be output
+                    fake_output = self.discriminator(torch.cat([gt_img_A, gen_img_B.detach()], dim=1))
+                    fake_label = torch.zeros([batch_size, 1, self.output_hw, self.output_hw], dtype=torch.float32).to(self.gpu)
+                    fake_loss = self.bce_loss(fake_output, fake_label)
+                    
+                    total_discriminator_loss = real_loss + fake_loss
                 
-                # Train Discriminator
-                opt_dis.zero_grad()
-                # real input and real shall be output
-                real_output = self.discriminator(torch.cat([gt_img_A, gt_img_B], dim=1))
-                real_label = torch.ones([batch_size, 1, self.output_hw, self.output_hw], dtype=torch.float32).to(self.gpu)
-                real_loss = self.bce_loss(real_output, real_label)
-                
-                # fake input and fake shall be output
-                fake_output = self.discriminator(torch.cat([gt_img_A, gen_img_B.detach()], dim=1))
-                fake_label = torch.zeros([batch_size, 1, self.output_hw, self.output_hw], dtype=torch.float32).to(self.gpu)
-                fake_loss = self.bce_loss(fake_output, fake_label)
-                
-                total_discriminator_loss = real_loss + fake_loss
-                total_discriminator_loss.backward()
-                opt_dis.step()
+                scaler.scale(total_discriminator_loss).backward()
+                scaler.step(opt_dis)
+                scaler.update()
                 
                 # Train Generator
                 opt_gen.zero_grad()
-                fake_output = self.discriminator(torch.cat([gt_img_A, gen_img_B], dim=1))
-                gen_gan_loss = self.bce_loss(fake_output, real_label)
-                perceptual_loss = self.perceptual_loss(gen_img_B, gt_img_B)
-                l1_loss = self.l1_loss(gen_img_B, gt_img_B)
-                tv_loss = self.tv_loss(gen_img_B)
-                total_generator_loss = gen_gan_loss + perceptual_loss + l1_loss + tv_loss
-                total_generator_loss.backward()
-                opt_gen.step()
+                with autocast("cuda", enabled=self.use_amp):
+                    fake_output = self.discriminator(torch.cat([gt_img_A, gen_img_B], dim=1))
+                    gen_gan_loss = self.bce_loss(fake_output, real_label)
+                    perceptual_loss = self.perceptual_loss(gen_img_B, gt_img_B)
+                    l1_loss = self.l1_loss(gen_img_B, gt_img_B)
+                    tv_loss = self.tv_loss(gen_img_B)
+                    total_generator_loss = gen_gan_loss + perceptual_loss + l1_loss + tv_loss
+                
+                scaler.scale(total_generator_loss).backward()
+                scaler.step(opt_gen)
+                scaler.update()
                 
                 scheduler_gen.step()
                 scheduler_dis.step()
@@ -229,7 +239,8 @@ if __name__ == "__main__":
                     config.input_hw, config.output_hw, config.batch_size, config.num_epochs, 
                     config.dataset_path, config.sample_size, config.random_flip, 
                     config.normalize_gram_matrix, config.vgg_layers_to_extract,
-                    config.perceptual_loss_lambda, config.l1_loss_lambda, config.grad_loss_lambda)
+                    config.perceptual_loss_lambda, config.l1_loss_lambda, config.grad_loss_lambda,
+                    config.use_amp)
     
     if not config.test_mode:
         model.train()

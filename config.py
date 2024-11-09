@@ -28,6 +28,7 @@ normalize_gram_matrix = True
 perceptual_loss_lambda = 150
 l1_loss_lambda = 2
 grad_loss_lambda = 1e+2
+use_amp = False
 
 # Testing
 test_mode = True
