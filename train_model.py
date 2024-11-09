@@ -31,6 +31,7 @@ class CGANDehaze(nn.Module):
         self.discriminator = DiscriminatorNet(input_nc, output_nc, ndf)
         self.discriminator = torch.compile(self.discriminator) 
         if perceptual_loss_lambda != 0:
+            self.vgg_layers_to_extract = vgg_layers_to_extract
             self.custom_vgg = VGGIntermediate(self.vgg_layers_to_extract)
             self.custom_vgg = torch.compile(self.custom_vgg)
         self.batch_size = batch_size
@@ -41,7 +42,6 @@ class CGANDehaze(nn.Module):
         self.sample_size = sample_size
         self.random_flip = random_flip
         self.normalize_gram_matrix = normalize_gram_matrix
-        self.vgg_layers_to_extract = vgg_layers_to_extract
         self.perceptual_loss_lambda = perceptual_loss_lambda
         self.l1_loss_lambda = l1_loss_lambda
         self.grad_loss_lambda = grad_loss_lambda
