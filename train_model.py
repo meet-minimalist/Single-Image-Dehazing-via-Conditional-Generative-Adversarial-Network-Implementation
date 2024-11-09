@@ -85,7 +85,7 @@ class CGANDehaze(nn.Module):
         perceptual_loss /= len(output_real)
         return perceptual_loss * self.perceptual_loss_lambda
             
-    def grad_loss(self, gen_img_B):
+    def tv_loss(self, gen_img_B):
         B, C, H, W = gen_img_B.size()
         
         x_diff = gen_img_B[:, :, :H-1, :W-1] - gen_img_B[:, :, :H-1, 1:W]
@@ -95,12 +95,11 @@ class CGANDehaze(nn.Module):
         res[:, :, :H-1, :W-1] = x_diff + y_diff
         res[:, :, :H-1, 1:W] -= x_diff
         res[:, :, 1:H, :W-1] -= y_diff
-        return res
+        return self.grad_loss_lambda * torch.mean(torch.abs(res))
 
-    def tv_loss(self, gen_img_B, gt_img_B):
+    def l1_loss(self, gen_img_B, gt_img_B):
         l1_loss = nn.L1Loss()
-        tv_loss = self.l1_loss_lambda * l1_loss(gen_img_B, gt_img_B) + self.grad_loss_lambda * self.grad_loss(gen_img_B)
-        return tv_loss
+        return self.l1_loss_lambda * l1_loss(gen_img_B, gt_img_B)
 
     def train(self):
         dataset = DehazingImageDataset(self.dataset_path, sample_size=self.sample_size, random_flip=self.random_flip)
@@ -151,8 +150,9 @@ class CGANDehaze(nn.Module):
                 fake_output = self.discriminator(torch.cat([gt_img_A, gen_img_B], dim=1))
                 gen_gan_loss = self.bce_loss(fake_output, real_label)
                 perceptual_loss = self.perceptual_loss(gen_img_B, gt_img_B)
-                tv_loss = self.tv_loss(gen_img_B, gt_img_B)
-                total_generator_loss = gen_gan_loss + perceptual_loss + tv_loss
+                l1_loss = self.l1_loss(gen_img_B, gt_img_B)
+                tv_loss = self.tv_loss(gen_img_B)
+                total_generator_loss = gen_gan_loss + perceptual_loss + l1_loss + tv_loss
                 total_generator_loss.backward()
                 opt_gen.step()
                 
@@ -160,7 +160,7 @@ class CGANDehaze(nn.Module):
                 scheduler_dis.step()
                 print("--"*30)
                 print(f"Epoch: {epoch+1}/{self.num_epochs}, Batch: {batch_num}/{len(data_loader)}, LR: {scheduler_gen.get_last_lr()[0]:.4f}")
-                print(f"Gen. GAN Loss: {gen_gan_loss:.4f}, Gen. Perceptual Loss: {perceptual_loss:.4f}, Gen. TV Loss: {tv_loss:.4f}")
+                print(f"Gen. GAN Loss: {gen_gan_loss:.4f}, Gen. Perceptual Loss: {perceptual_loss:.4f}, Gen. L1 Loss: {l1_loss:.4f}, Gen. TV Loss: {tv_loss:.4f}")
                 print(f"Total Gen. Loss: {total_generator_loss:.4f}, Disc. Loss: {total_discriminator_loss:.4f}")
                 
                 img_1 = gen_img_B.detach().to(self.host)
