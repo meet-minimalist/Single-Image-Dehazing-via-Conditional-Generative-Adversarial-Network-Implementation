@@ -39,6 +39,7 @@ class DehazingImageDataset(Dataset):
             hazy_img_name = os.path.basename(gt_img_path).replace("GT", "hazy")
             hazy_img_path = os.path.join(self.hazy_dir, hazy_img_name)
             self.img_paths.append([gt_img_path, hazy_img_path])
+        random.shuffle(self.img_paths)
         
         self.is_train = is_train
         self.classes = [0, 1]       # 0 : Fake, 1 : Real
