@@ -9,7 +9,9 @@
 import os
 import torch
 import torch.nn as nn
+from PIL import Image
 import torch.optim as optim
+import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -184,17 +186,41 @@ class CGANDehaze(nn.Module):
             torch.save(self.generator.state_dict(), f"./saved_models/generator_epoch_{epoch}.pth")
             torch.save(self.discriminator.state_dict(), f"./saved_models/discriminator_epoch_{epoch}.pth")
     
-    def test(self):
-        pass
+    def test(self, gen_model_path, test_img_path, test_output_path):
+        self.generator.load_state_dict(torch.load(gen_model_path))
+        
+        self.generator.to(self.gpu)
+        
+        test_img = Image.open(test_img_path).convert("RGB")
+        test_img = test_img.resize((256, 256))
+        
+        test_img = transforms.ToTensor()(test_img)      # converts [H, W, C] into [C, H, W] and divides image by 255.
+        test_img = (test_img * 2) - 1                   # converts [0-1] into [-1, 1] 
+        test_img = torch.unsqueeze(test_img, 0)
+        test_img = test_img.to(self.gpu)
+        
+        output_img = self.generator(test_img)
+        
+        output_img = torch.clamp(output_img, -1, 1)
+
+        output_img = (output_img + 1) / 2               # Now in [0, 1]
+
+        transform_to_pil = transforms.ToPILImage()
+        output_img = transform_to_pil(output_img.squeeze(0))
+
+        output_img.save(test_output_path)
     
     
 if __name__ == "__main__":
     import config
-    model = CGANDehaze(config.input_nc, config.output_nc, config.base_channels_gen, config.base_channels_dis,
-                       config.input_hw, config.output_hw, config.batch_size, config.num_epochs, 
-                       config.dataset_path, config.sample_size, config.random_flip, 
-                       config.normalize_gram_matrix, config.vgg_layers_to_extract,
-                       config.perceptual_loss_lambda, config.l1_loss_lambda, config.grad_loss_lambda)
-    model.train()
     
-    # model.test()  
+    model = CGANDehaze(config.input_nc, config.output_nc, config.base_channels_gen, config.base_channels_dis,
+                    config.input_hw, config.output_hw, config.batch_size, config.num_epochs, 
+                    config.dataset_path, config.sample_size, config.random_flip, 
+                    config.normalize_gram_matrix, config.vgg_layers_to_extract,
+                    config.perceptual_loss_lambda, config.l1_loss_lambda, config.grad_loss_lambda)
+    
+    if not config.test_mode:
+        model.train()
+    else:
+        model.test(config.gen_model_path, config.test_img_path, config.test_output_path)  

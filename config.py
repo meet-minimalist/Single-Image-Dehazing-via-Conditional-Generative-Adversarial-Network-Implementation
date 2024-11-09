@@ -28,3 +28,10 @@ normalize_gram_matrix = True
 perceptual_loss_lambda = 150
 l1_loss_lambda = 2
 grad_loss_lambda = 1e+2
+
+# Testing
+test_mode = True
+gen_model_path = "/mnt/d/d/DeepLearning/Workfoster-CGAN/CGAN-Dehazing/saved_models/generator_epoch_9.pth"
+test_img_path = "/mnt/d/d/DeepLearning/Workfoster-CGAN/Dense_Haze_NTIRE19/hazy/01_hazy.png"
+test_output_path = "./test_result.jpg"
+
