@@ -30,6 +30,9 @@ class CGANDehaze(nn.Module):
         self.generator = torch.compile(self.generator) 
         self.discriminator = DiscriminatorNet(input_nc, output_nc, ndf)
         self.discriminator = torch.compile(self.discriminator) 
+        if perceptual_loss_lambda != 0:
+            self.custom_vgg = VGGIntermediate(self.vgg_layers_to_extract)
+            self.custom_vgg = torch.compile(self.custom_vgg)
         self.batch_size = batch_size
         self.num_epochs = num_epochs
         self.input_hw = input_hw
@@ -53,17 +56,18 @@ class CGANDehaze(nn.Module):
         return loss(prediction, label)
     
     def perceptual_loss(self, generator_clear_image, real_clear_image):
-        custom_vgg = VGGIntermediate(self.vgg_layers_to_extract)
-        custom_vgg.to(self.gpu)
-        custom_vgg.eval()
+        if self.perceptual_loss_lambda == 0:
+            return 0
+        
+        self.custom_vgg.eval()
 
-        for param in custom_vgg.parameters():
+        for param in self.custom_vgg.parameters():
             param.requires_grad = False
             
         # Adding 1 to the input which is feed to custom_vgg, because these
         # tensors are generated in the range of [-1, 1]
-        outputs_generated = custom_vgg(generator_clear_image + 1)
-        outputs_real = custom_vgg(real_clear_image.detach() + 1)
+        outputs_generated = self.custom_vgg(generator_clear_image + 1)
+        outputs_real = self.custom_vgg(real_clear_image.detach() + 1)
 
         perceptual_loss = 0
         for output_real, output_gen in zip(outputs_real, outputs_generated):
@@ -88,6 +92,9 @@ class CGANDehaze(nn.Module):
         return perceptual_loss * self.perceptual_loss_lambda
             
     def tv_loss(self, gen_img_B):
+        if self.grad_loss_lambda == 0:
+            return 0
+        
         B, C, H, W = gen_img_B.size()
         
         x_diff = gen_img_B[:, :, :H-1, :W-1] - gen_img_B[:, :, :H-1, 1:W]
@@ -100,6 +107,8 @@ class CGANDehaze(nn.Module):
         return self.grad_loss_lambda * torch.mean(torch.abs(res))
 
     def l1_loss(self, gen_img_B, gt_img_B):
+        if self.l1_loss_lambda == 0:
+            return 0
         l1_loss = nn.L1Loss()
         return self.l1_loss_lambda * l1_loss(gen_img_B, gt_img_B)
 
@@ -109,6 +118,8 @@ class CGANDehaze(nn.Module):
         
         self.generator.to(self.gpu)
         self.discriminator.to(self.gpu)
+        if self.perceptual_loss_lambda != 0:
+            self.custom_vgg.to(self.gpu)
         
         opt_gen = optim.Adam(self.generator.parameters(), lr=1e-3, betas=(0.5, 0.999))
         opt_dis = optim.Adam(self.discriminator.parameters(), lr=1e-4, betas=(0.5, 0.999))
