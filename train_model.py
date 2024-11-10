@@ -151,6 +151,8 @@ class CGANDehaze(nn.Module):
         global_step = 1
         scaler = GradScaler("cuda", enabled=self.use_amp)
         test_img = Image.open(config.test_img_path).convert("RGB")
+        test_img = test_img.resize((512, 512))
+        
         for epoch in range(self.num_epochs):
             mean_ssim = 0
             mean_psnr = 0
@@ -227,7 +229,7 @@ class CGANDehaze(nn.Module):
     
     
             self.generator.eval()
-            output_img = self.run_single_img(test_img)
+            output_img = self.run_single_img(test_img, resize_wh=None)
             self.generator.train()
 
             test_img_w, test_img_h = test_img.size
@@ -238,9 +240,9 @@ class CGANDehaze(nn.Module):
             comb_img.save(comb_img_path)
 
 
-    def run_single_img(self, test_img, resize=True):
-        if resize:
-            test_img = test_img.resize((256, 256))
+    def run_single_img(self, test_img, resize_wh=(256, 256)):
+        if resize_wh:
+            test_img = test_img.resize(resize_wh)
         
         test_img = transforms.ToTensor()(test_img)      # converts [H, W, C] into [C, H, W] and divides image by 255.
         test_img = (test_img * 2) - 1                   # converts [0-1] into [-1, 1] 

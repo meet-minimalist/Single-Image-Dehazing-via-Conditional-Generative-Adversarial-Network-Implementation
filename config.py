@@ -33,7 +33,7 @@ use_amp = True
 output_dir = "./experiment_files"
 
 # Testing
-test_mode = True
+test_mode = False
 gen_model_path = "/mnt/d/d/DeepLearning/Workfoster-CGAN/CGAN-Dehazing/saved_models/generator_epoch_9.pth"
 test_img_path = "/mnt/d/d/DeepLearning/Workfoster-CGAN/Dense_Haze_NTIRE19/hazy/01_hazy.png"
 test_output_path = "./test_result.jpg"

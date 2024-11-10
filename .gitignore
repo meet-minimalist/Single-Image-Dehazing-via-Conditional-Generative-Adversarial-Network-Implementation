@@ -1,5 +1,6 @@
 __pycache__/
 saved_models/
+experiment_files/
 
 content_loss.py
 data.py
