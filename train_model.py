@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 import torch.optim as optim
+import torch.nn.functional as F
 import torchvision.transforms as transforms
 from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
@@ -20,13 +21,14 @@ from model import GeneratorNet, DiscriminatorNet
 from dataset_helper import DehazingImageDataset
 from metrics import get_psnr, get_ssim
 from vgg_perceptual_loss import VGGIntermediate
-                    
+from logger import SingletonLogger
+
 class CGANDehaze(nn.Module):
     def __init__(self, input_nc, output_nc, ngf, ndf, input_hw, output_hw, 
                  batch_size, num_epochs, dataset_path, sample_size, random_flip, 
-                 normalize_gram_matrix, vgg_layers_to_extract,
+                 use_gram_matrix_for_perceptual_loss, normalize_gram_matrix, vgg_layers_to_extract,
                  perceptual_loss_lambda, l1_loss_lambda, grad_loss_lambda,
-                 use_amp):
+                 use_amp, output_dir):
         super().__init__()
         self.generator = GeneratorNet(input_nc, output_nc, ngf)
         self.generator = torch.compile(self.generator) 
@@ -43,11 +45,17 @@ class CGANDehaze(nn.Module):
         self.dataset_path = dataset_path
         self.sample_size = sample_size
         self.random_flip = random_flip
+        self.use_gram_matrix_for_perceptual_loss = use_gram_matrix_for_perceptual_loss
         self.normalize_gram_matrix = normalize_gram_matrix
         self.perceptual_loss_lambda = perceptual_loss_lambda
         self.l1_loss_lambda = l1_loss_lambda
         self.grad_loss_lambda = grad_loss_lambda
         self.use_amp = use_amp
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        logger_instance = SingletonLogger(log_dir=self.output_dir, log_file="training.log")
+        self.logger = logger_instance.get_logger()
         
         self.gpu = torch.device("cuda:0")
         self.host = torch.device("cpu:0")
@@ -55,8 +63,7 @@ class CGANDehaze(nn.Module):
     def bce_loss(self, prediction, label):
         # prediction : [1, 1, 256, 256]     --> Sigmoid is applied in Discriminator model.
         # label      : [1, 1, 256, 256]
-        loss = nn.BCELoss()
-        return loss(prediction, label)
+        return F.binary_cross_entropy_with_logits(prediction, label)
     
     def perceptual_loss(self, generator_clear_image, real_clear_image):
         if self.perceptual_loss_lambda == 0:
@@ -69,28 +76,35 @@ class CGANDehaze(nn.Module):
             
         # Adding 1 to the input which is feed to custom_vgg, because these
         # tensors are generated in the range of [-1, 1]
-        outputs_generated = self.custom_vgg(generator_clear_image + 1)
-        outputs_real = self.custom_vgg(real_clear_image.detach() + 1)
+        outputs_generated = self.custom_vgg((generator_clear_image + 1) / 2)
+        outputs_real = self.custom_vgg((real_clear_image.detach() + 1) / 2)
 
         perceptual_loss = 0
         for output_real, output_gen in zip(outputs_real, outputs_generated):
-            batch, channel, height, width = output_real.shape
-            output_real = torch.reshape(output_real, [batch, channel, -1])
-            output_real_transpose = torch.transpose(output_real, 2, 1)
-            output_real_gram = torch.bmm(output_real, output_real_transpose)
-            # [B, C, C]
+            batch, channel, height, width = output_real.shape\
             
-            output_gen = torch.reshape(output_gen, [batch, channel, -1])
-            output_gen_transpose = torch.transpose(output_gen, 2, 1)
-            output_gen_gram = torch.bmm(output_gen, output_gen_transpose)
-            # [B, C, C]
+            if self.use_gram_matrix_for_perceptual_loss:
+                with autocast(self.gpu.type, enabled=False):
+                    output_real = torch.reshape(output_real, [batch, channel, -1])
+                    output_real_transpose = torch.transpose(output_real, 2, 1)
+                    if self.normalize_gram_matrix or self.use_amp:
+                        # For AMP training, normalizing is must otherwise loss becomes nan.
+                        output_real = output_real / (channel * height * width)
+                    output_real_gram = torch.bmm(output_real, output_real_transpose)
+                    # [B, C, C]
+                    
+                    output_gen = torch.reshape(output_gen, [batch, channel, -1])
+                    output_gen_transpose = torch.transpose(output_gen, 2, 1)
+                    if self.normalize_gram_matrix or self.use_amp:
+                        # For AMP training, normalizing is must otherwise loss becomes nan.
+                        output_gen = output_gen / (channel * height * width)
+                    output_gen_gram = torch.bmm(output_gen, output_gen_transpose)
+                    # [B, C, C]
 
-            if self.normalize_gram_matrix:
-                output_real_gram /= (channel * height * width)
-                output_gen_gram /= (channel * height * width)
-
-            perceptual_loss += torch.mean((output_gen_gram - output_real_gram) ** 2)
-        
+                    perceptual_loss += torch.mean((output_gen_gram - output_real_gram) ** 2)
+            else:
+                perceptual_loss += F.mse_loss(output_gen, output_real)
+                    
         perceptual_loss /= len(output_real)
         return perceptual_loss * self.perceptual_loss_lambda
             
@@ -124,8 +138,11 @@ class CGANDehaze(nn.Module):
         if self.perceptual_loss_lambda != 0:
             self.custom_vgg.to(self.gpu)
         
-        opt_gen = optim.Adam(self.generator.parameters(), lr=1e-3, betas=(0.5, 0.999))
-        opt_dis = optim.Adam(self.discriminator.parameters(), lr=1e-4, betas=(0.5, 0.999))
+        kwargs = {}
+        if self.use_amp:
+            kwargs["amsgrad"] = True
+        opt_gen = optim.Adam(self.generator.parameters(), lr=1e-3, **kwargs) #betas=(0.5, 0.999))
+        opt_dis = optim.Adam(self.discriminator.parameters(), lr=1e-3, **kwargs) #, betas=(0.5, 0.999))
         
         total_steps = self.num_epochs * len(data_loader)
         scheduler_gen = CosineAnnealingLR(opt_gen, T_max=total_steps, eta_min=1e-5)
@@ -133,6 +150,7 @@ class CGANDehaze(nn.Module):
         
         global_step = 1
         scaler = GradScaler("cuda", enabled=self.use_amp)
+        test_img = Image.open(config.test_img_path).convert("RGB")
         for epoch in range(self.num_epochs):
             mean_ssim = 0
             mean_psnr = 0
@@ -181,10 +199,10 @@ class CGANDehaze(nn.Module):
                 
                 scheduler_gen.step()
                 scheduler_dis.step()
-                print("--"*30)
-                print(f"Epoch: {epoch+1}/{self.num_epochs}, Batch: {batch_num}/{len(data_loader)}, LR: {scheduler_gen.get_last_lr()[0]:.4f}")
-                print(f"Gen. GAN Loss: {gen_gan_loss:.4f}, Gen. Perceptual Loss: {perceptual_loss:.4f}, Gen. L1 Loss: {l1_loss:.4f}, Gen. TV Loss: {tv_loss:.4f}")
-                print(f"Total Gen. Loss: {total_generator_loss:.4f}, Disc. Loss: {total_discriminator_loss:.4f}")
+                self.logger.info("--"*30)
+                self.logger.info(f"Epoch: {epoch+1}/{self.num_epochs}, Batch: {batch_num}/{len(data_loader)}, LR: {scheduler_gen.get_last_lr()[0]:.4f}")
+                self.logger.info(f"Gen. GAN Loss: {gen_gan_loss:.4f}, Gen. Perceptual Loss: {perceptual_loss:.4f}, Gen. L1 Loss: {l1_loss:.4f}, Gen. TV Loss: {tv_loss:.4f}")
+                self.logger.info(f"Total Gen. Loss: {total_generator_loss:.4f}, Disc. Loss: {total_discriminator_loss:.4f}")
                 
                 img_1 = gen_img_B.detach().to(self.host)
                 img_2 = gt_img_B.detach().to(self.host)
@@ -200,20 +218,29 @@ class CGANDehaze(nn.Module):
                 global_step += 1
             mean_ssim /= len(data_loader)
             mean_psnr /= len(data_loader)
-            print(f"Mean PSNR: {mean_psnr:.4f}, Mean SSIM: {mean_ssim:.4f}")
-            print(f"Epoch: {epoch+1}/{self.num_epochs} Completed.")
+            self.logger.info(f"Mean PSNR: {mean_psnr:.4f}, Mean SSIM: {mean_ssim:.4f}")
+            self.logger.info(f"Epoch: {epoch+1}/{self.num_epochs} Completed.")
             
-            os.makedirs("saved_models", exist_ok=True)
-            torch.save(self.generator.state_dict(), f"./saved_models/generator_epoch_{epoch}.pth")
-            torch.save(self.discriminator.state_dict(), f"./saved_models/discriminator_epoch_{epoch}.pth")
+            exp_id = f"epoch_{epoch}_gl_{total_generator_loss:.4f}_dl_{total_discriminator_loss:.4f}_psnr_{mean_psnr:.4f}_ssim_{mean_ssim:.4f}"
+            torch.save(self.generator.state_dict(), os.path.join(self.output_dir, f"generator_{exp_id}.pth"))
+            torch.save(self.discriminator.state_dict(), os.path.join(self.output_dir, f"discriminator_{exp_id}.pth"))
     
-    def test(self, gen_model_path, test_img_path, test_output_path):
-        self.generator.load_state_dict(torch.load(gen_model_path))
-        
-        self.generator.to(self.gpu)
-        
-        test_img = Image.open(test_img_path).convert("RGB")
-        test_img = test_img.resize((256, 256))
+    
+            self.generator.eval()
+            output_img = self.run_single_img(test_img)
+            self.generator.train()
+
+            test_img_w, test_img_h = test_img.size
+            comb_img = Image.new("RGB", (test_img_w * 2, test_img_h))
+            comb_img.paste(test_img, (0, 0))
+            comb_img.paste(output_img, (test_img_w, 0))
+            comb_img_path = os.path.join(self.output_dir, f"comb_img_epoch_{epoch}.jpg")
+            comb_img.save(comb_img_path)
+
+
+    def run_single_img(self, test_img, resize=True):
+        if resize:
+            test_img = test_img.resize((256, 256))
         
         test_img = transforms.ToTensor()(test_img)      # converts [H, W, C] into [C, H, W] and divides image by 255.
         test_img = (test_img * 2) - 1                   # converts [0-1] into [-1, 1] 
@@ -228,9 +255,20 @@ class CGANDehaze(nn.Module):
 
         transform_to_pil = transforms.ToPILImage()
         output_img = transform_to_pil(output_img.squeeze(0))
-
-        output_img.save(test_output_path)
+        return output_img
     
+    def test(self, gen_model_path, test_img_path, test_output_path, save_output=True):
+        self.generator.load_state_dict(torch.load(gen_model_path))
+        self.generator.eval()
+        self.generator.to(self.gpu)
+        
+        test_img = Image.open(test_img_path).convert("RGB")
+        output_img = self.run_single_img(test_img, resize=True)
+        
+        if save_output:
+            output_img.save(test_output_path)
+        
+        self.generator.train()
     
 if __name__ == "__main__":
     import config
@@ -238,9 +276,10 @@ if __name__ == "__main__":
     model = CGANDehaze(config.input_nc, config.output_nc, config.base_channels_gen, config.base_channels_dis,
                     config.input_hw, config.output_hw, config.batch_size, config.num_epochs, 
                     config.dataset_path, config.sample_size, config.random_flip, 
+                    config.use_gram_matrix_for_perceptual_loss,
                     config.normalize_gram_matrix, config.vgg_layers_to_extract,
                     config.perceptual_loss_lambda, config.l1_loss_lambda, config.grad_loss_lambda,
-                    config.use_amp)
+                    config.use_amp, config.output_dir)
     
     if not config.test_mode:
         model.train()

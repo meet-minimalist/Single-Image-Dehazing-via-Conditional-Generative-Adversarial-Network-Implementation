@@ -159,7 +159,6 @@ class DiscriminatorNet(nn.Module):
 
         self.l6 = nn.Sequential(
             nn.Conv2d(ndf * 8, 1, kernel_size=3, stride=1, padding=1),
-            nn.Sigmoid()
         )
 
     def forward(self, x):
