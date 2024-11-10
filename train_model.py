@@ -28,7 +28,7 @@ class CGANDehaze(nn.Module):
                  batch_size, num_epochs, dataset_path, sample_size, random_flip, 
                  use_gram_matrix_for_perceptual_loss, normalize_gram_matrix, vgg_layers_to_extract,
                  perceptual_loss_lambda, l1_loss_lambda, grad_loss_lambda,
-                 use_amp, output_dir):
+                 use_amp, output_dir, generator_start_lr, discriminator_start_lr):
         super().__init__()
         self.generator = GeneratorNet(input_nc, output_nc, ngf)
         self.generator = torch.compile(self.generator) 
@@ -51,6 +51,8 @@ class CGANDehaze(nn.Module):
         self.l1_loss_lambda = l1_loss_lambda
         self.grad_loss_lambda = grad_loss_lambda
         self.use_amp = use_amp
+        self.generator_start_lr = generator_start_lr
+        self.discriminator_start_lr = discriminator_start_lr
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         
@@ -141,8 +143,8 @@ class CGANDehaze(nn.Module):
         kwargs = {}
         if self.use_amp:
             kwargs["amsgrad"] = True
-        opt_gen = optim.Adam(self.generator.parameters(), lr=1e-3, **kwargs) #betas=(0.5, 0.999))
-        opt_dis = optim.Adam(self.discriminator.parameters(), lr=1e-3, **kwargs) #, betas=(0.5, 0.999))
+        opt_gen = optim.Adam(self.generator.parameters(), lr=self.generator_start_lr, **kwargs) #betas=(0.5, 0.999))
+        opt_dis = optim.Adam(self.discriminator.parameters(), lr=self.discriminator_start_lr, **kwargs) #, betas=(0.5, 0.999))
         
         total_steps = self.num_epochs * len(data_loader)
         scheduler_gen = CosineAnnealingLR(opt_gen, T_max=total_steps, eta_min=1e-5)
@@ -281,7 +283,8 @@ if __name__ == "__main__":
                     config.use_gram_matrix_for_perceptual_loss,
                     config.normalize_gram_matrix, config.vgg_layers_to_extract,
                     config.perceptual_loss_lambda, config.l1_loss_lambda, config.grad_loss_lambda,
-                    config.use_amp, config.output_dir)
+                    config.use_amp, config.output_dir,
+                    config.generator_start_lr, config.discriminator_start_lr)
     
     if not config.test_mode:
         model.train()

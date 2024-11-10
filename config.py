@@ -31,6 +31,8 @@ l1_loss_lambda = 150
 grad_loss_lambda = 1e-2
 use_amp = True
 output_dir = "./experiment_files"
+generator_start_lr = 1e-3
+discriminator_start_lr = 1e-4
 
 # Testing
 test_mode = False
