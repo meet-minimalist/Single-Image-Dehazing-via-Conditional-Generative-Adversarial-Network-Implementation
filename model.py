@@ -11,70 +11,109 @@ import torch.nn as nn
 
 # Define the generator network
 class GeneratorNet(nn.Module):
-    def __init__(self, input_nc, output_nc, ngf):
+    def __init__(self, input_nc, output_nc, ngf, drop_prob):
         super(GeneratorNet, self).__init__()
         
         # Encoder layers
-        self.e0 = nn.Conv2d(input_nc, ngf, kernel_size=5, stride=1, padding=2)
+        self.e0 = nn.Conv2d(input_nc, ngf, kernel_size=5, stride=1, padding=2, bias=False)
         self.e0_1 = nn.Sequential(
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ngf, ngf, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(ngf, ngf, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(ngf)
         )
         self.e1 = nn.Sequential(
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ngf, ngf, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(ngf, ngf, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf)
         )
         self.e2 = nn.Sequential(
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ngf, ngf * 2, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(ngf, ngf * 2, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf * 2)
         )
         self.e3 = nn.Sequential(
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ngf * 2, ngf * 4, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(ngf * 2, ngf * 4, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf * 4)
         )
         self.e4 = nn.Sequential(
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ngf * 4, ngf * 8, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(ngf * 4, ngf * 8, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf * 8)
         )
         self.e5 = nn.Sequential(
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ngf * 8, ngf * 16, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(ngf * 8, ngf * 16, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf * 16)
         )
         # FIXME: Do we need 3 more conv with 1024 as per paper.
+        self.e6 = nn.Sequential(
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ngf * 16, ngf * 16, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(ngf * 16)
+        )
+
+        self.e7 = nn.Sequential(
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ngf * 16, ngf * 16, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(ngf * 16)
+        )
+
+        self.e8 = nn.Sequential(
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ngf * 16, ngf * 16, kernel_size=4, stride=2, padding=1, bias=True),
+        )
 
         # Decoder layers
+        self.d1_ = nn.Sequential(
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(ngf * 16, ngf * 16, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(ngf * 16)
+        )
+        self.d2_ = nn.Sequential(
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(ngf * 16, ngf * 16, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(ngf * 16)
+        )
+        self.d3_ = nn.Sequential(
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(ngf * 16, ngf * 16, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(ngf * 16)
+        )
         self.d4_ = nn.Sequential(
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(ngf * 16, ngf * 8, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(ngf * 16, ngf * 8, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf * 8)
         )
         self.d5_ = nn.Sequential(
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(ngf * 8, ngf * 4, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(ngf * 8, ngf * 4, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf * 4)
         )
         self.d6_ = nn.Sequential(
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(ngf * 4, ngf * 2, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(ngf * 4, ngf * 2, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf * 2)
         )
         self.d7_ = nn.Sequential(
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(ngf * 2, ngf, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(ngf * 2, ngf, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf)
         )
         self.d8 = nn.Sequential(
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(ngf, ngf, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(ngf, ngf, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(ngf)
         )
 
+        self.drop_e1 = nn.Dropout(p=drop_prob)
+        self.drop_e2 = nn.Dropout(p=drop_prob)
+        self.drop_e3 = nn.Dropout(p=drop_prob)
+        self.drop_e4 = nn.Dropout(p=drop_prob)
+        self.drop_e5 = nn.Dropout(p=drop_prob)
+        self.drop_e6 = nn.Dropout(p=drop_prob)
+        self.drop_e7 = nn.Dropout(p=drop_prob)
+        
         # Additional convolutional layers for the output
         self.output_layers = nn.Sequential(
             nn.Conv2d(ngf, output_nc, kernel_size=3, stride=1, padding=1),
@@ -105,20 +144,38 @@ class GeneratorNet(nn.Module):
         e5 = self.e5(e4)
         # [1, 1024, 8, 8]
 
+        e6 = self.e6(e5)
+        # [1, 1024, 4, 4]
+
+        e7 = self.e7(e6)
+        # [1, 1024, 2, 2]
+
+        e8 = self.e8(e7)
+        # [1, 1024, 1, 1]
+
         # Decoder forward pass with skip connections
-        d4_ = self.d4_(e5)
+        d1_ = self.d1_(e8)
+        # [1, 1024, 2, 2]
+
+        d2_ = self.d2_(d1_ + self.drop_e7(e7))
+        # [1, 1024, 4, 4]
+        
+        d3_ = self.d3_(d2_ + self.drop_e6(e6))
+        # [1, 1024, 8, 8]
+
+        d4_ = self.d4_(d3_ + self.drop_e5(e5))
         # [1, 512, 16, 16]
 
-        d5_ = self.d5_(d4_ + e4)
+        d5_ = self.d5_(d4_ + self.drop_e4(e4))
         # [1, 256, 32, 32]
 
-        d6_ = self.d6_(d5_ + e3)
+        d6_ = self.d6_(d5_ + self.drop_e3(e3))
         # [1, 128, 64, 64]
 
-        d7_ = self.d7_(d6_ + e2)
+        d7_ = self.d7_(d6_ + self.drop_e2(e2))
         # [1, 64, 128, 128]
         
-        d8 = self.d8(d7_ + e1)
+        d8 = self.d8(d7_ + self.drop_e1(e1))
         # [1, 64, 256, 256]
 
         # Output layers
@@ -134,25 +191,25 @@ class DiscriminatorNet(nn.Module):
         super(DiscriminatorNet, self).__init__()
         
         self.l1 = nn.Sequential(
-            nn.Conv2d(input_nc + output_nc, ndf, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(input_nc + output_nc, ndf, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(ndf),
             nn.LeakyReLU(0.2, inplace=True)
         )
         
         self.l2 = nn.Sequential(
-            nn.Conv2d(ndf, ndf * 2, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(ndf, ndf * 2, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(ndf * 2),
             nn.LeakyReLU(0.2, inplace=True),
         )
         
         self.l3 = nn.Sequential(
-            nn.Conv2d(ndf * 2, ndf * 4, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(ndf * 2, ndf * 4, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(ndf * 4),
             nn.LeakyReLU(0.2, inplace=True),
         )
 
         self.l4 = nn.Sequential(
-            nn.Conv2d(ndf * 4, ndf * 8, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(ndf * 4, ndf * 8, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(ndf * 8),
             nn.LeakyReLU(0.2, inplace=True),
         )
@@ -189,7 +246,8 @@ if __name__ == "__main__":
     input_hw = 256
     output_hw = 256
     base_channels = 64
-    generator = GeneratorNet(input_nc=input_nc, output_nc=output_nc, ngf=base_channels)
+    drop_prob = 0.2
+    generator = GeneratorNet(input_nc=input_nc, output_nc=output_nc, ngf=base_channels, drop_prob=drop_prob)
     summary(generator, input_size=(input_nc, input_hw, input_hw), device="cpu")
     dummy_image = torch.randn(1, input_nc, input_hw, input_hw).to(torch.float32)
     gen_image = generator(dummy_image)

@@ -21,18 +21,23 @@ random_flip = True
 sample_size = [input_hw, input_hw]
 
 # Training
-num_epochs = 10
+num_epochs = 25
 batch_size = 2
 vgg_layers_to_extract = [4, 9, 16, 23]
-use_gram_matrix_for_perceptual_loss = True
+use_gram_matrix_for_perceptual_loss = False
 normalize_gram_matrix = True
-perceptual_loss_lambda = 150
-l1_loss_lambda = 150
-grad_loss_lambda = 1e-2
+
+learned_loss_multipliers = True
+gan_loss_lambda = 20
+perceptual_loss_lambda = 2
+l1_loss_lambda = 50
+grad_loss_lambda = 0
 use_amp = True
-output_dir = "./experiment_files"
+output_dir = "./experiment_files_v8"
 generator_start_lr = 1e-3
 discriminator_start_lr = 1e-4
+gen_drop_prob = 0.2
+weight_decay = 0
 
 # Testing
 test_mode = False

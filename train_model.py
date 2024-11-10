@@ -27,10 +27,11 @@ class CGANDehaze(nn.Module):
     def __init__(self, input_nc, output_nc, ngf, ndf, input_hw, output_hw, 
                  batch_size, num_epochs, dataset_path, sample_size, random_flip, 
                  use_gram_matrix_for_perceptual_loss, normalize_gram_matrix, vgg_layers_to_extract,
-                 perceptual_loss_lambda, l1_loss_lambda, grad_loss_lambda,
-                 use_amp, output_dir, generator_start_lr, discriminator_start_lr):
+                 learned_loss_multipliers, gan_loss_lambda, perceptual_loss_lambda, l1_loss_lambda, grad_loss_lambda,
+                 use_amp, output_dir, generator_start_lr, discriminator_start_lr,
+                 gen_drop_prob, weight_decay):
         super().__init__()
-        self.generator = GeneratorNet(input_nc, output_nc, ngf)
+        self.generator = GeneratorNet(input_nc, output_nc, ngf, gen_drop_prob)
         self.generator = torch.compile(self.generator) 
         self.discriminator = DiscriminatorNet(input_nc, output_nc, ndf)
         self.discriminator = torch.compile(self.discriminator) 
@@ -47,15 +48,25 @@ class CGANDehaze(nn.Module):
         self.random_flip = random_flip
         self.use_gram_matrix_for_perceptual_loss = use_gram_matrix_for_perceptual_loss
         self.normalize_gram_matrix = normalize_gram_matrix
+        self.learned_loss_multipliers = learned_loss_multipliers
+        self.gan_loss_lambda = gan_loss_lambda
         self.perceptual_loss_lambda = perceptual_loss_lambda
         self.l1_loss_lambda = l1_loss_lambda
         self.grad_loss_lambda = grad_loss_lambda
         self.use_amp = use_amp
         self.generator_start_lr = generator_start_lr
         self.discriminator_start_lr = discriminator_start_lr
+        self.weight_decay = weight_decay
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         
+        if self.learned_loss_multipliers:
+            # Initialize weights as learnable parameters
+            self.gan_loss_lambda = nn.Parameter(torch.tensor(1.0, requires_grad=True))  # Initial weights can be any value
+            self.perceptual_loss_lambda = nn.Parameter(torch.tensor(1.0, requires_grad=True))
+            self.l1_loss_lambda = nn.Parameter(torch.tensor(1.0, requires_grad=True))
+            self.grad_loss_lambda = nn.Parameter(torch.tensor(1.0, requires_grad=True))
+
         logger_instance = SingletonLogger(log_dir=self.output_dir, log_file="training.log")
         self.logger = logger_instance.get_logger()
         
@@ -65,7 +76,11 @@ class CGANDehaze(nn.Module):
     def bce_loss(self, prediction, label):
         # prediction : [1, 1, 256, 256]     --> Sigmoid is applied in Discriminator model.
         # label      : [1, 1, 256, 256]
-        return F.binary_cross_entropy_with_logits(prediction, label)
+        if self.learned_loss_multipliers:
+            multiplier = torch.exp(self.gan_loss_lambda)
+        else:
+            multiplier = self.gan_loss_lambda
+        return multiplier * F.binary_cross_entropy_with_logits(prediction, label)
     
     def perceptual_loss(self, generator_clear_image, real_clear_image):
         if self.perceptual_loss_lambda == 0:
@@ -108,7 +123,11 @@ class CGANDehaze(nn.Module):
                 perceptual_loss += F.mse_loss(output_gen, output_real)
                     
         perceptual_loss /= len(output_real)
-        return perceptual_loss * self.perceptual_loss_lambda
+        if self.learned_loss_multipliers:
+            multiplier = torch.exp(self.perceptual_loss_lambda)
+        else:
+            multiplier = self.perceptual_loss_lambda
+        return multiplier * perceptual_loss
             
     def tv_loss(self, gen_img_B):
         if self.grad_loss_lambda == 0:
@@ -123,13 +142,21 @@ class CGANDehaze(nn.Module):
         res[:, :, :H-1, :W-1] = x_diff + y_diff
         res[:, :, :H-1, 1:W] -= x_diff
         res[:, :, 1:H, :W-1] -= y_diff
-        return self.grad_loss_lambda * torch.mean(torch.abs(res))
+        if self.learned_loss_multipliers:
+            multiplier = torch.exp(self.grad_loss_lambda)
+        else:
+            multiplier = self.grad_loss_lambda
+        return multiplier * torch.mean(torch.abs(res))
 
     def l1_loss(self, gen_img_B, gt_img_B):
         if self.l1_loss_lambda == 0:
             return 0
         l1_loss = nn.L1Loss()
-        return self.l1_loss_lambda * l1_loss(gen_img_B, gt_img_B)
+        if self.learned_loss_multipliers:
+            multiplier = torch.exp(self.l1_loss_lambda)
+        else:
+            multiplier = self.l1_loss_lambda
+        return multiplier * l1_loss(gen_img_B, gt_img_B)
 
     def train(self):
         dataset = DehazingImageDataset(self.dataset_path, sample_size=self.sample_size, random_flip=self.random_flip)
@@ -143,7 +170,14 @@ class CGANDehaze(nn.Module):
         kwargs = {}
         if self.use_amp:
             kwargs["amsgrad"] = True
-        opt_gen = optim.Adam(self.generator.parameters(), lr=self.generator_start_lr, **kwargs) #betas=(0.5, 0.999))
+        if self.weight_decay:
+            kwargs["weight_decay"] = self.weight_decay
+            
+        generator_params = list(self.generator.parameters())
+        if self.learned_loss_multipliers:
+            generator_params.extend([self.gan_loss_lambda, self.perceptual_loss_lambda, self.grad_loss_lambda, self.l1_loss_lambda])
+        
+        opt_gen = optim.Adam(generator_params, lr=self.generator_start_lr, **kwargs) #betas=(0.5, 0.999))
         opt_dis = optim.Adam(self.discriminator.parameters(), lr=self.discriminator_start_lr, **kwargs) #, betas=(0.5, 0.999))
         
         total_steps = self.num_epochs * len(data_loader)
@@ -158,16 +192,19 @@ class CGANDehaze(nn.Module):
         for epoch in range(self.num_epochs):
             mean_ssim = 0
             mean_psnr = 0
+            self.generator.train()
+            self.discriminator.train()
+        
             for batch_num, data in enumerate(data_loader):
-                gt_img_A, gt_img_B, hazy_img_A, hazy_img_B = data
+                gt_img_A, gt_img_B, _, hazy_img_B = data
                 gt_img_A = gt_img_A.to(self.gpu)
                 gt_img_B = gt_img_B.to(self.gpu)
-                hazy_img_A = hazy_img_A.to(self.gpu)
+                # hazy_img_A = hazy_img_A.to(self.gpu)
                 hazy_img_B = hazy_img_B.to(self.gpu)
                 batch_size = gt_img_A.shape[0]
                 
                 with autocast("cuda", enabled=self.use_amp):
-                    gen_img_B = self.generator(hazy_img_B)
+                    gen_img_B_detached = self.generator(hazy_img_B).detach()
                     
                     # Train Discriminator
                     opt_dis.zero_grad()
@@ -177,7 +214,7 @@ class CGANDehaze(nn.Module):
                     real_loss = self.bce_loss(real_output, real_label)
                     
                     # fake input and fake shall be output
-                    fake_output = self.discriminator(torch.cat([gt_img_A, gen_img_B.detach()], dim=1))
+                    fake_output = self.discriminator(torch.cat([gt_img_A, gen_img_B_detached], dim=1))
                     fake_label = torch.zeros([batch_size, 1, self.output_hw, self.output_hw], dtype=torch.float32).to(self.gpu)
                     fake_loss = self.bce_loss(fake_output, fake_label)
                     
@@ -190,6 +227,7 @@ class CGANDehaze(nn.Module):
                 # Train Generator
                 opt_gen.zero_grad()
                 with autocast("cuda", enabled=self.use_amp):
+                    gen_img_B = self.generator(hazy_img_B)
                     fake_output = self.discriminator(torch.cat([gt_img_A, gen_img_B], dim=1))
                     gen_gan_loss = self.bce_loss(fake_output, real_label)
                     perceptual_loss = self.perceptual_loss(gen_img_B, gt_img_B)
@@ -207,6 +245,7 @@ class CGANDehaze(nn.Module):
                 self.logger.info(f"Epoch: {epoch+1}/{self.num_epochs}, Batch: {batch_num}/{len(data_loader)}, LR: {scheduler_gen.get_last_lr()[0]:.4f}")
                 self.logger.info(f"Gen. GAN Loss: {gen_gan_loss:.4f}, Gen. Perceptual Loss: {perceptual_loss:.4f}, Gen. L1 Loss: {l1_loss:.4f}, Gen. TV Loss: {tv_loss:.4f}")
                 self.logger.info(f"Total Gen. Loss: {total_generator_loss:.4f}, Disc. Loss: {total_discriminator_loss:.4f}")
+                self.logger.info(f"Gen. GAN lambda: {self.gan_loss_lambda:.4f}, Gen. Perceptual lambda: {self.perceptual_loss_lambda:.4f}, Gen. L1 lambda: {self.l1_loss_lambda:.4f}, Gen. TV lambda: {self.grad_loss_lambda:.4f}")
                 
                 img_1 = gen_img_B.detach().to(self.host)
                 img_2 = gt_img_B.detach().to(self.host)
@@ -282,9 +321,10 @@ if __name__ == "__main__":
                     config.dataset_path, config.sample_size, config.random_flip, 
                     config.use_gram_matrix_for_perceptual_loss,
                     config.normalize_gram_matrix, config.vgg_layers_to_extract,
-                    config.perceptual_loss_lambda, config.l1_loss_lambda, config.grad_loss_lambda,
+                    config.learned_loss_multipliers, config.gan_loss_lambda, config.perceptual_loss_lambda, config.l1_loss_lambda, config.grad_loss_lambda,
                     config.use_amp, config.output_dir,
-                    config.generator_start_lr, config.discriminator_start_lr)
+                    config.generator_start_lr, config.discriminator_start_lr, config.gen_drop_prob,
+                    config.weight_decay)
     
     if not config.test_mode:
         model.train()
