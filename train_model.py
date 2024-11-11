@@ -17,6 +17,8 @@ from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+
+from checkpoint_handler import CheckpointHandler
 from model import GeneratorNet, DiscriminatorNet
 from dataset_helper import DehazingImageDataset
 from metrics import get_psnr, get_ssim
@@ -65,7 +67,7 @@ class CGANDehaze(nn.Module):
             self.gan_loss_lambda = nn.Parameter(torch.tensor(1.0, requires_grad=True))  # Initial weights can be any value
             self.perceptual_loss_lambda = nn.Parameter(torch.tensor(1.0, requires_grad=True))
             self.l1_loss_lambda = nn.Parameter(torch.tensor(1.0, requires_grad=True))
-            self.grad_loss_lambda = nn.Parameter(torch.tensor(1.0, requires_grad=True))
+            self.grad_loss_lambda = nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
         logger_instance = SingletonLogger(log_dir=self.output_dir, log_file="training.log")
         self.logger = logger_instance.get_logger()
@@ -135,6 +137,9 @@ class CGANDehaze(nn.Module):
         
         B, C, H, W = gen_img_B.size()
         
+        # x_diff = torch.abs(gen_img_B[:, :, :H-1, :W-1] - gen_img_B[:, :, :H-1, 1:W])
+        # y_diff = torch.abs(gen_img_B[:, :, :H-1, :W-1] - gen_img_B[:, :, 1:H, :W-1])
+        # tv_loss = torch.sum(x_diff + y_diff)
         x_diff = gen_img_B[:, :, :H-1, :W-1] - gen_img_B[:, :, :H-1, 1:W]
         y_diff = gen_img_B[:, :, :H-1, :W-1] - gen_img_B[:, :, 1:H, :W-1]
         
@@ -142,11 +147,12 @@ class CGANDehaze(nn.Module):
         res[:, :, :H-1, :W-1] = x_diff + y_diff
         res[:, :, :H-1, 1:W] -= x_diff
         res[:, :, 1:H, :W-1] -= y_diff
+        tv_loss = torch.mean(torch.abs(res))
         if self.learned_loss_multipliers:
             multiplier = torch.exp(self.grad_loss_lambda)
         else:
             multiplier = self.grad_loss_lambda
-        return multiplier * torch.mean(torch.abs(res))
+        return multiplier * tv_loss
 
     def l1_loss(self, gen_img_B, gt_img_B):
         if self.l1_loss_lambda == 0:
@@ -161,15 +167,17 @@ class CGANDehaze(nn.Module):
     def train(self):
         dataset = DehazingImageDataset(self.dataset_path, sample_size=self.sample_size, random_flip=self.random_flip)
         data_loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
-        
+        gen_ckpt_handler = CheckpointHandler(self.output_dir, "generator", max_to_keep=3)
+        disc_ckpt_handler = CheckpointHandler(self.output_dir, "discriminator", max_to_keep=3)
+    
         self.generator.to(self.gpu)
         self.discriminator.to(self.gpu)
         if self.perceptual_loss_lambda != 0:
             self.custom_vgg.to(self.gpu)
         
         kwargs = {}
-        if self.use_amp:
-            kwargs["amsgrad"] = True
+        # if self.use_amp:
+        #     kwargs["amsgrad"] = True
         if self.weight_decay:
             kwargs["weight_decay"] = self.weight_decay
             
@@ -177,8 +185,8 @@ class CGANDehaze(nn.Module):
         if self.learned_loss_multipliers:
             generator_params.extend([self.gan_loss_lambda, self.perceptual_loss_lambda, self.grad_loss_lambda, self.l1_loss_lambda])
         
-        opt_gen = optim.Adam(generator_params, lr=self.generator_start_lr, **kwargs) #betas=(0.5, 0.999))
-        opt_dis = optim.Adam(self.discriminator.parameters(), lr=self.discriminator_start_lr, **kwargs) #, betas=(0.5, 0.999))
+        opt_gen = optim.RMSprop(generator_params, lr=self.generator_start_lr, **kwargs) #betas=(0.5, 0.999))
+        opt_dis = optim.RMSprop(self.discriminator.parameters(), lr=self.discriminator_start_lr, **kwargs) #, betas=(0.5, 0.999))
         
         total_steps = self.num_epochs * len(data_loader)
         scheduler_gen = CosineAnnealingLR(opt_gen, T_max=total_steps, eta_min=1e-5)
@@ -245,7 +253,7 @@ class CGANDehaze(nn.Module):
                 self.logger.info(f"Epoch: {epoch+1}/{self.num_epochs}, Batch: {batch_num}/{len(data_loader)}, LR: {scheduler_gen.get_last_lr()[0]:.4f}")
                 self.logger.info(f"Gen. GAN Loss: {gen_gan_loss:.4f}, Gen. Perceptual Loss: {perceptual_loss:.4f}, Gen. L1 Loss: {l1_loss:.4f}, Gen. TV Loss: {tv_loss:.4f}")
                 self.logger.info(f"Total Gen. Loss: {total_generator_loss:.4f}, Disc. Loss: {total_discriminator_loss:.4f}")
-                self.logger.info(f"Gen. GAN lambda: {self.gan_loss_lambda:.4f}, Gen. Perceptual lambda: {self.perceptual_loss_lambda:.4f}, Gen. L1 lambda: {self.l1_loss_lambda:.4f}, Gen. TV lambda: {self.grad_loss_lambda:.4f}")
+                self.logger.info(f"Gen. GAN lambda: {self.gan_loss_lambda.item():.4f}, Gen. Perceptual lambda: {self.perceptual_loss_lambda.item():.4f}, Gen. L1 lambda: {self.l1_loss_lambda.item():.4f}, Gen. TV lambda: {self.grad_loss_lambda.item():.4f}")
                 
                 img_1 = gen_img_B.detach().to(self.host)
                 img_2 = gt_img_B.detach().to(self.host)
@@ -264,9 +272,26 @@ class CGANDehaze(nn.Module):
             self.logger.info(f"Mean PSNR: {mean_psnr:.4f}, Mean SSIM: {mean_ssim:.4f}")
             self.logger.info(f"Epoch: {epoch+1}/{self.num_epochs} Completed.")
             
-            exp_id = f"epoch_{epoch}_gl_{total_generator_loss:.4f}_dl_{total_discriminator_loss:.4f}_psnr_{mean_psnr:.4f}_ssim_{mean_ssim:.4f}"
-            torch.save(self.generator.state_dict(), os.path.join(self.output_dir, f"generator_{exp_id}.pth"))
-            torch.save(self.discriminator.state_dict(), os.path.join(self.output_dir, f"discriminator_{exp_id}.pth"))
+            gen_checkpoint = {
+                "epoch": epoch,
+                "global_step": global_step,
+                "gen_loss": total_generator_loss,
+                "disc_loss": total_discriminator_loss,
+                "model": self.generator.state_dict(),\
+                "mean_psnr": mean_psnr,
+                "mean_ssim": mean_ssim,
+            }
+            gen_ckpt_handler.save(gen_checkpoint)
+            disc_checkpoint = {
+                "epoch": epoch,
+                "global_step": global_step,
+                "gen_loss": total_generator_loss,
+                "disc_loss": total_discriminator_loss,
+                "model": self.discriminator.state_dict(),
+                "mean_psnr": mean_psnr,
+                "mean_ssim": mean_ssim,
+            }
+            disc_ckpt_handler.save(disc_checkpoint)
     
     
             self.generator.eval()

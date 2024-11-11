@@ -21,7 +21,7 @@ random_flip = True
 sample_size = [input_hw, input_hw]
 
 # Training
-num_epochs = 25
+num_epochs = 200
 batch_size = 2
 vgg_layers_to_extract = [4, 9, 16, 23]
 use_gram_matrix_for_perceptual_loss = False
@@ -33,15 +33,15 @@ perceptual_loss_lambda = 2
 l1_loss_lambda = 50
 grad_loss_lambda = 0
 use_amp = True
-output_dir = "./experiment_files_v8"
+output_dir = "./experiment_files"
 generator_start_lr = 1e-3
-discriminator_start_lr = 1e-4
-gen_drop_prob = 0.2
-weight_decay = 0
+discriminator_start_lr = 1e-3
+gen_drop_prob = 0.1
+weight_decay = 1e-4
 
 # Testing
 test_mode = False
 gen_model_path = "/mnt/d/d/DeepLearning/Workfoster-CGAN/CGAN-Dehazing/saved_models/generator_epoch_9.pth"
-test_img_path = "/mnt/d/d/DeepLearning/Workfoster-CGAN/Dense_Haze_NTIRE19/hazy/01_hazy.png"
+test_img_path = "/mnt/d/d/DeepLearning/Workfoster-CGAN/Dense_Haze_NTIRE19/hazy/02_hazy.png"
 test_output_path = "./test_result.jpg"
 
